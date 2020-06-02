@@ -18,9 +18,8 @@ module Network.Carbon.Plaintext
   where
 
 import Control.Exception (bracketOnError)
-import Control.Monad (unless)
-import Data.Monoid ((<>), mempty, mappend)
 import Data.Typeable (Typeable)
+import System.IO.Error
 
 import qualified Data.ByteString.Builder as Builder
 import qualified Data.Time as Time
@@ -49,22 +48,22 @@ connect :: Network.SockAddr -> IO Connection
 connect sockAddr = fmap Connection $ do
   let openSocket = Network.socket Network.AF_INET Network.Stream Network.defaultProtocol
   bracketOnError openSocket
-                 Network.close
-                 (\s -> fmap (const s) (Network.connect s sockAddr))
+                 (\sock -> Network.gracefulClose sock 1000)
+                 (\sock -> fmap (const sock) (Network.connect sock sockAddr))
 
 
 --------------------------------------------------------------------------------
 -- | Disconnect from Carbon. Note that it's still valid to 'sendMetrics' to this
 -- 'Connection', and it will result in a reconnection.
 disconnect :: Connection -> IO ()
-disconnect (Connection s) = Network.close s
+disconnect (Connection sock) = Network.gracefulClose sock 1000
 
 
 --------------------------------------------------------------------------------
 reconnect :: Connection -> IO ()
-reconnect (Connection s) = do
-  peer <- Network.getPeerName s
-  Network.connect s peer
+reconnect (Connection sock) = do
+  peer <- Network.getPeerName sock
+  Network.connect sock peer
 
 
 --------------------------------------------------------------------------------
@@ -83,11 +82,10 @@ data Metric = Metric
 sendMetrics :: Connection -> V.Vector Metric -> IO ()
 sendMetrics c ms = do
   let socket = connectionSocket c
-
-  do isWritable <- Network.isWritable socket
-     unless isWritable (reconnect c)
-
-  Network.sendAll socket (Builder.toLazyByteString (V.foldl' mappend mempty (V.map encodeMetric ms)))
+  let sendIt = Network.sendAll socket (Builder.toLazyByteString (V.foldl' mappend mempty (V.map encodeMetric ms)))
+  catchIOError sendIt (\_ -> do
+    reconnect c
+    sendIt)
 
 --------------------------------------------------------------------------------
 -- | Send a single metric.
